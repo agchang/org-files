@@ -1,0 +1,17 @@
+* 2024
+** 7
+*** 5
+- Playing with org mode!
+
+
+#+begin_src emacs-lisp
+  (+ 2 5)
+#+end_src
+
+#+RESULTS:
+: 7
+
+#+BEGIN_SRC python
+  import os
+  print(os.getpid())
+#+END_SRC

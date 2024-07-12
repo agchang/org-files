@@ -1,0 +1,78 @@
+* Arrow Internals Exploration
+** Create a parquet file in duckdb
+#+BEGIN_SRC sql
+  create temporary table foo(num int);
+  insert into foo values (0);
+  insert into foo values (1);
+  insert into foo values (null);
+  insert into foo values (3);
+  COPY foo TO 'foo.parquet' (FORMAT PARQUET);
+#+END_SRC
+
+** Convert parquet to arrow file
+#+BEGIN_SRC python
+  import pyarrow.parquet as pq
+  import pyarrow.feather as feather
+
+  t = pq.read_table("foo.parquet")
+  feather.write_feather(t, "foo.arrow")  # note the default compresses message bodies with lz4!
+#+END_SRC
+
+** Extract Schema and RecordBatch header using poke
+#+BEGIN_SRC shell
+  poke foo.arrow
+  .mem schema
+  copy :from_ios 0 :from 0x10#B :to 0x0#B :size 0x78#B
+  save :file "schema.bin" :from 0#B :size 0x78#B
+  .mem rb_header
+  copy :from_ios 0 :from 0x90#B :to 0x0#B :size 0x98#B
+  save :file "rb_header.bin" :from 0#B :size 0x98#B
+#+END_SRC
+
+**  Inspect using flatbuffer generated code
+#+BEGIN_SRC shell
+  flatc -p /Users/agc/Home/oss/arrow/format/Message.fbs /Users/agc/Home/oss/arrow/format/Schema.fbs
+#+END_SRC 
+#+BEGIN_SRC python
+  import org.apache.arrow.flatbuf.Schema as Schema
+  import org.apache.arrow.flatbuf.Message as Message
+
+  buf = open("schema.bin", "rb").read()
+  buf = bytearray(buf)
+  m = Message.Message.GetRootAsMessage(buf, 0)
+  s = Schema.Schema()
+  s.Init(m.Header().Bytes, m.Header().Pos)
+  s.Fields(0).Name()
+
+  import org.apache.arrow.flatbuf.RecordBatch as RecordBatch
+  buf = open("rb_header.bin", "rb").read()
+  buf = bytearray(buf)
+  m2 = Message.Message.GetRootAsMessage(buf, 0)
+  r = RecordBatch.RecordBatch()
+  r.Init(m2.Header().Bytes, m2.Header().Pos)
+  r.Nodes(0).NullCount()  # 1
+  r.Nodes(0).Length()  # 4
+  r.BuffersLength()  # 2
+  r.Buffers(0).Offset()  # 0
+  r.Buffers(0).Length()  # 24
+  
+  r.Buffers(1).Offset()  # 24
+  r.Buffers(1).Length()  # 39
+#+END_SRC
+
+It took me a while to figure out what we exactly in the buffers, since they weren't simply a bitmap or the values. It turns out
+the default behavior of write_feather is to compress the buffers with LZ4, so let's extract the compressed message and decompress it!
+
+The address 0x130 is taken from the beginning of the message body (i.e. after the message header) plus 8 bytes for what appears to be the
+byte-length of the uncompressed buffer. The size 16 is from the buffer length (24) minus the 8 bytes for length.
+#+BEGIN_SRC shell
+  poke foo.arrow
+  copy :from_ios 0 :from 0x130#B :to 0x0#B :size 16#B
+  save :file "b1.bin" :from 0#B :size 16#B
+#+END_SRC
+
+#+BEGIN_SRC shell
+  lz4 -d b1.bin b1-o.bin
+#+END_SRC
+
+And look at b1-o.bin in the hex editor, and behold, the bitmap!
